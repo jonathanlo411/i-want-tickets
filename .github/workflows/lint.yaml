@@ -42,8 +42,8 @@ jobs:
       - name: Run isort (import ordering)
         run: |
           isort \
-            --profile pep8 \
             --line-length 79 \
+            --force-sort-within-sections \
             .
 
       - name: Check for changes
