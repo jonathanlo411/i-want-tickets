@@ -1,0 +1,6 @@
+
+# Virtual Environment
+.venv
+
+# Generate Compose
+docker-compose.yaml
