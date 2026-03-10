@@ -1,4 +1,8 @@
 # I Want Tickets
+
+<a href="https://github.com/jonathanlo411/i-want-tickets/releases"><img src="https://img.shields.io/github/v/release/jonathanlo411/i-want-tickets?color=f56827"></a>
+<a href="https://github.com/jonathanlo411/i-want-tickets/blob/main/LICENSE"><img src="https://img.shields.io/github/license/jonathanlo411/i-want-tickets"></a>
+
 I Want Tickets is a utility script to increase chances at getting tickets by spinning up multiple lightweight containerized Chrome sessions.
 
 ## Overview
