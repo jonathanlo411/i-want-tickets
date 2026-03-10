@@ -1,0 +1,67 @@
+name: Python Cleanup (PEP8)
+
+on:
+  pull_request:
+    branches:
+      - "**"
+
+permissions:
+  contents: write
+
+jobs:
+  lint-and-fix:
+    name: Auto-format Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install formatters
+        run: |
+          pip install autopep8 isort
+
+      - name: Run autopep8 (PEP8 + whitespace)
+        run: |
+          autopep8 \
+            --in-place \
+            --aggressive \
+            --aggressive \
+            --max-line-length 79 \
+            --recursive \
+            .
+
+      - name: Run isort (import ordering)
+        run: |
+          isort \
+            --profile pep8 \
+            --line-length 79 \
+            .
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Files changed:"
+            git diff --name-only
+          fi
+
+      - name: Commit and push fixes
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "style: auto-format Python to PEP8 [skip ci]"
+          git push
