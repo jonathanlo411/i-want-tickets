@@ -1,4 +1,3 @@
-import atexit
 import json
 import math
 import os
@@ -8,8 +7,6 @@ import re
 import time
 import signal
 import subprocess
-import threading
-from subprocess import Popen
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
@@ -21,12 +18,7 @@ try:
 except ImportError:
     screeninfo = None
 
-# Global state
-all_drivers = []
-chrome_pids = []
 docker_process = None
-chrome_service = None
-_cleanup_called = False
 
 DOCKER_COMPOSE = """
 version: "3"
@@ -35,78 +27,23 @@ services:
 """
 
 
-# ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
-
-def _kill_docker_process():
-    """Kill the docker-compose UP process without touching the containers."""
-    global docker_process
-    if not docker_process or docker_process.poll() is not None:
-        return
-    try:
+def cleanup(signum=None, frame=None):
+    print("\n\nStopping docker containers...")
+    if docker_process and docker_process.poll() is None:
         if IS_WINDOWS:
-            # On Windows, terminate() sends CTRL_C_EVENT which the console
-            # forwards to ALL attached processes — exactly the problem we're
-            # trying to avoid.  taskkill /F /T kills the process tree directly.
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(docker_process.pid)],
-                capture_output=True,
-            )
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(docker_process.pid)], capture_output=True)
         else:
             docker_process.terminate()
-        docker_process.wait(timeout=5)
-    except Exception:
-        try:
-            docker_process.kill()
-        except Exception:
-            pass
-
-
-def cleanup():
-    global _cleanup_called
-    if _cleanup_called:
-        return
-    _cleanup_called = True
-
-    print("\n\nShutting down gracefully...")
-
-    print(f"Closing {len(all_drivers)} browser instance(s)...")
-    for driver in all_drivers:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-
-    # Stop docker containers.
-    _kill_docker_process()
-    print("Stopping docker containers...")
-    try:
-        subprocess.run(["docker-compose", "down"], timeout=60)
-        print("  Docker containers stopped.")
-    except Exception as e:
-        print(f"  docker-compose down failed: {e}")
-
-    print("Cleanup complete.")
-
-
-def _signal_handler(signum, frame):
-    cleanup()
+    subprocess.run(["docker-compose", "down"], timeout=60)
+    print("Done.")
     os._exit(0)
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     global DOCKER_COMPOSE, docker_process
 
-    # Register cleanup on both signal and normal exit so Ctrl+C in any shell
-    # (PowerShell, Git Bash, cmd) is covered.
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
-    atexit.register(cleanup)  # fallback for KeyboardInterrupt that bypasses signal handler
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
 
     config = load_config()
 
@@ -123,36 +60,20 @@ def main():
     with open("docker-compose.yaml", "w") as f:
         f.write(DOCKER_COMPOSE)
 
-    # Launch docker-compose in a new process GROUP so the Windows console
-    # does not broadcast Ctrl+C to it.  On Windows this is done via
-    # CREATE_NEW_PROCESS_GROUP; on Unix, start_new_session=True is equivalent.
     if IS_WINDOWS:
-        docker_process = Popen(
-            ["docker-compose", "up"],
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
+        docker_process = subprocess.Popen(["docker-compose", "up"], creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
-        docker_process = Popen(
-            ["docker-compose", "up"],
-            start_new_session=True,
-        )
+        docker_process = subprocess.Popen(["docker-compose", "up"], start_new_session=True)
 
     print("Waiting for containers to start...")
     time.sleep(3)
 
     open_browsers(config, config["browser_count"])
 
-    print("\nPress Ctrl+C to stop and clean up...")
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass  # atexit.register(cleanup) will fire on exit
+    print("\nPress Ctrl+C to stop containers and clean up...")
+    while True:
+        time.sleep(1)
 
-
-# ---------------------------------------------------------------------------
-# Config / helpers
-# ---------------------------------------------------------------------------
 
 def load_config() -> dict:
     try:
@@ -168,15 +89,12 @@ def load_config() -> dict:
 
 
 def extract_domain_name(uri: str) -> str:
-    match = re.search(
-        r'https?://(?:[a-zA-Z0-9-]+\.)*([a-zA-Z0-9-]+)\.[a-zA-Z0-9]+(?:/|$)', uri
-    )
+    match = re.search(r'https?://(?:[a-zA-Z0-9-]+\.)*([a-zA-Z0-9-]+)\.[a-zA-Z0-9]+(?:/|$)', uri)
     return match.group(1) if match else "browser"
 
 
 def get_screen_info():
     if screeninfo is None:
-        print("screeninfo not installed. Install with: pip install screeninfo")
         return None
     try:
         screens = screeninfo.get_monitors()
@@ -185,12 +103,8 @@ def get_screen_info():
         primary = next((s for s in screens if s.is_primary), screens[0])
         print(f"Detected {len(screens)} screen(s) | Primary: {primary.width}x{primary.height}")
         return {
-            "primary": {"width": primary.width, "height": primary.height,
-                        "x": primary.x, "y": primary.y},
-            "all_screens": [
-                {"width": s.width, "height": s.height, "x": s.x, "y": s.y}
-                for s in screens
-            ],
+            "primary": {"width": primary.width, "height": primary.height, "x": primary.x, "y": primary.y},
+            "all_screens": [{"width": s.width, "height": s.height, "x": s.x, "y": s.y} for s in screens],
             "total_screens": len(screens),
         }
     except Exception as e:
@@ -198,58 +112,42 @@ def get_screen_info():
         return None
 
 
-def calculate_window_positions(config, screen_info, browser_count):
+def calculate_window_positions(config, screen_info):
     orientation = config.get("screen_orientation", "auto")
-    primary_height = screen_info["primary"]["height"]
     screens = screen_info["all_screens"]
     positions = []
 
     if orientation == "auto":
-        orientation = "double" if primary_height <= 1080 else "grid"
+        orientation = "double" if screen_info["primary"]["height"] <= 1080 else "grid"
 
     if orientation == "grid":
-        for si, screen in enumerate(screens):
+        for si, s in enumerate(screens):
             positions += [
-                {"x": screen["x"],                        "y": screen["y"],
-                 "width": screen["width"] // 2,           "height": screen["height"] // 2, "screen": si},
-                {"x": screen["x"] + screen["width"] // 2, "y": screen["y"],
-                 "width": screen["width"] // 2,           "height": screen["height"] // 2, "screen": si},
-                {"x": screen["x"],                        "y": screen["y"] + screen["height"] // 2,
-                 "width": screen["width"] // 2,           "height": screen["height"] // 2, "screen": si},
-                {"x": screen["x"] + screen["width"] // 2, "y": screen["y"] + screen["height"] // 2,
-                 "width": screen["width"] // 2,           "height": screen["height"] // 2, "screen": si},
+                {"x": s["x"],                   "y": s["y"],                    "width": s["width"] // 2, "height": s["height"] // 2},
+                {"x": s["x"] + s["width"] // 2,  "y": s["y"],                    "width": s["width"] // 2, "height": s["height"] // 2},
+                {"x": s["x"],                   "y": s["y"] + s["height"] // 2,  "width": s["width"] // 2, "height": s["height"] // 2},
+                {"x": s["x"] + s["width"] // 2,  "y": s["y"] + s["height"] // 2, "width": s["width"] // 2, "height": s["height"] // 2},
             ]
     elif orientation == "double":
-        for si, screen in enumerate(screens):
+        for si, s in enumerate(screens):
             positions += [
-                {"x": screen["x"],                        "y": screen["y"],
-                 "width": screen["width"] // 2,           "height": screen["height"], "screen": si},
-                {"x": screen["x"] + screen["width"] // 2, "y": screen["y"],
-                 "width": screen["width"] // 2,           "height": screen["height"], "screen": si},
+                {"x": s["x"],                   "y": s["y"], "width": s["width"] // 2, "height": s["height"]},
+                {"x": s["x"] + s["width"] // 2,  "y": s["y"], "width": s["width"] // 2, "height": s["height"]},
             ]
     elif orientation == "triple":
-        for si, screen in enumerate(screens):
+        for si, s in enumerate(screens):
             positions += [
-                {"x": screen["x"],                             "y": screen["y"],
-                 "width": screen["width"] // 3,                "height": screen["height"], "screen": si},
-                {"x": screen["x"] + screen["width"] // 3,     "y": screen["y"],
-                 "width": screen["width"] // 3,                "height": screen["height"], "screen": si},
-                {"x": screen["x"] + screen["width"] * 2 // 3, "y": screen["y"],
-                 "width": screen["width"] // 3,                "height": screen["height"], "screen": si},
+                {"x": s["x"],                       "y": s["y"], "width": s["width"] // 3,      "height": s["height"]},
+                {"x": s["x"] + s["width"] // 3,     "y": s["y"], "width": s["width"] // 3,      "height": s["height"]},
+                {"x": s["x"] + s["width"] * 2 // 3, "y": s["y"], "width": s["width"] // 3,      "height": s["height"]},
             ]
     return positions
 
 
-# ---------------------------------------------------------------------------
-# Browser helpers
-# ---------------------------------------------------------------------------
-
 def open_browsers(config, browser_count: int) -> None:
-    global chrome_service
     print("Setting up ChromeDriver...")
     try:
         service = Service(ChromeDriverManager().install())
-        chrome_service = service
     except Exception as e:
         print(f"Error installing ChromeDriver: {e}")
         return
@@ -262,79 +160,33 @@ def open_browsers(config, browser_count: int) -> None:
 
     if config.get("browser_mode") == "tabs":
         print("Opening single browser with tabs...")
-        open_browser_with_tabs(service, browser_count)
-    else:
-        print("Opening multiple browser windows...")
-        open_browser_windows(service, browser_count, config, screen_info)
-
-
-def open_browser_with_tabs(service, browser_count):
-    global all_drivers
-    try:
         driver = webdriver.Chrome(service=service)
         driver.maximize_window()
-        all_drivers.append(driver)
-        try:
-            cd = psutil.Process(driver.service.process.pid)
-            chrome_pids.extend([c.pid for c in cd.children(recursive=True)])
-        except Exception:
-            pass
         urls = [f"http://localhost:{3000 + i}" for i in range(browser_count)]
-        for attempt in range(5):
-            try:
-                driver.get(urls[0])
-                print(f"Opened tab 1: {urls[0]}")
-                break
-            except Exception:
-                if attempt == 4:
-                    print("Failed to open first tab.")
-                    return
-                time.sleep(2)
-        for i, url in enumerate(urls[1:], start=2):
-            try:
-                driver.execute_script(f"window.open('{url}', '_blank');")
-                print(f"Opened tab {i}: {url}")
-                time.sleep(0.5)
-            except Exception as e:
-                print(f"Error opening tab {i}: {e}")
-    except Exception as e:
-        print(f"Error opening browser with tabs: {e}")
-
-
-def open_browser_windows(service, browser_count, config, screen_info):
-    global all_drivers
-    positions = calculate_window_positions(config, screen_info, browser_count)
-
-    for i in range(browser_count):
-        url = f"http://localhost:{3000 + i}"
-        print(f"Opening window {i + 1}: {url}...")
-        pos = positions[i % len(positions)] if positions else {
-            "x": 100 + i * 50, "y": 100 + i * 50, "width": 400, "height": 400
-        }
-        for attempt in range(5):
-            try:
-                driver = webdriver.Chrome(service=service)
-                driver.get(url)
-                driver.set_window_position(pos["x"], pos["y"])
-                driver.set_window_size(pos["width"], pos["height"])
-                all_drivers.append(driver)
+        driver.get(urls[0])
+        for url in urls[1:]:
+            driver.execute_script(f"window.open('{url}', '_blank');")
+    else:
+        print("Opening multiple browser windows...")
+        positions = calculate_window_positions(config, screen_info)
+        for i in range(browser_count):
+            url = f"http://localhost:{3000 + i}"
+            pos = positions[i % len(positions)] if positions else {"x": 100 + i*50, "y": 100 + i*50, "width": 400, "height": 400}
+            print(f"Opening window {i + 1}: {url}...")
+            for attempt in range(5):
                 try:
-                    cd = psutil.Process(driver.service.process.pid)
-                    chrome_pids.extend([c.pid for c in cd.children(recursive=True)])
-                except Exception:
-                    pass
-                print(
-                    f"  Window {i + 1} at ({pos['x']}, {pos['y']}) "
-                    f"size {pos['width']}x{pos['height']}"
-                )
-                time.sleep(0.1)
-                break
-            except Exception as e:
-                if attempt < 4:
-                    print(f"  Attempt {attempt + 1} failed, retrying...")
-                    time.sleep(2)
-                else:
-                    print(f"  Failed to open window {i + 1}: {e}")
+                    driver = webdriver.Chrome(service=service)
+                    driver.get(url)
+                    driver.set_window_position(pos["x"], pos["y"])
+                    driver.set_window_size(pos["width"], pos["height"])
+                    print(f"  Window {i + 1} at ({pos['x']}, {pos['y']}) size {pos['width']}x{pos['height']}")
+                    time.sleep(0.1)
+                    break
+                except Exception as e:
+                    if attempt < 4:
+                        time.sleep(2)
+                    else:
+                        print(f"  Failed to open window {i + 1}: {e}")
 
 
 def create_web_tempalte(name: str, port: int, uri: str):
