@@ -18,7 +18,7 @@ try:
 except ImportError:
     screeninfo = None
 
-docker_process = None
+DOCKER_PROCESS = None
 
 DOCKER_COMPOSE = """
 version: "3"
@@ -29,18 +29,18 @@ services:
 
 def cleanup(signum=None, frame=None):
     print("\n\nStopping docker containers...")
-    if docker_process and docker_process.poll() is None:
+    if DOCKER_PROCESS and DOCKER_PROCESS.poll() is None:
         if IS_WINDOWS:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(docker_process.pid)], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(DOCKER_PROCESS.pid)], capture_output=True)
         else:
-            docker_process.terminate()
+            DOCKER_PROCESS.terminate()
     subprocess.run(["docker-compose", "down"], timeout=60)
     print("Done.")
     os._exit(0)
 
 
 def main():
-    global DOCKER_COMPOSE, docker_process
+    global DOCKER_COMPOSE, DOCKER_PROCESS
 
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
@@ -61,9 +61,9 @@ def main():
         f.write(DOCKER_COMPOSE)
 
     if IS_WINDOWS:
-        docker_process = subprocess.Popen(["docker-compose", "up"], creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        DOCKER_PROCESS = subprocess.Popen(["docker-compose", "up"], creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
-        docker_process = subprocess.Popen(["docker-compose", "up"], start_new_session=True)
+        DOCKER_PROCESS = subprocess.Popen(["docker-compose", "up"], start_new_session=True)
 
     print("Waiting for containers to start...")
     time.sleep(3)
